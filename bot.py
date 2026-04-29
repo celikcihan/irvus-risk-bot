@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
+
 from dotenv import load_dotenv
 load_dotenv()
-
 
 import os
 import logging
@@ -13,7 +13,13 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 
 DEX_BASE = "https://api.dexscreener.com"
@@ -35,13 +41,15 @@ BUY_AMOUNTS = [1000, 1500, 2000, 5000, 10000, 20000]
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 
-DEFAULT_CHAIN = os.getenv("CHAIN", "bsc")
+DEFAULT_CHAIN = os.getenv("CHAIN", "base")
 DEFAULT_TOKEN_ADDRESS = os.getenv("TOKEN_ADDRESS", "")
 DEFAULT_PAIR_ADDRESS = os.getenv("PAIR_ADDRESS", "")
 DEFAULT_QUERY = os.getenv("QUERY", "")
 
-BURNED_SUPPLY = float(os.getenv("BURNED_SUPPLY", "0"))
-LOCKED_SUPPLY = float(os.getenv("LOCKED_SUPPLY", "0"))
+PROJECT_NAME = os.getenv("PROJECT_NAME", "IRVUS")
+
+BURNED_SUPPLY = float(os.getenv("BURNED_SUPPLY", "71070000"))
+LOCKED_SUPPLY = float(os.getenv("LOCKED_SUPPLY", "200000000"))
 TOTAL_SUPPLY = float(os.getenv("TOTAL_SUPPLY", "1000000000"))
 
 ALERT_LIQUIDITY_BELOW = float(os.getenv("ALERT_LIQUIDITY_BELOW", "90000"))
@@ -55,7 +63,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-logger = logging.getLogger("telegram-risk-bot")
+logger = logging.getLogger("irvus-risk-bot")
 
 
 @dataclass
@@ -146,13 +154,6 @@ def simulate_buy_constant_product(
     buy_quote: float,
     fee_pct: float = 0.003,
 ) -> Dict[str, float]:
-    if reserve_token <= 0 or reserve_quote <= 0:
-        raise ValueError("Reserves must be positive.")
-    if buy_quote <= 0:
-        raise ValueError("buy_quote must be positive.")
-    if not (0 <= fee_pct < 1):
-        raise ValueError("fee_pct must be between 0 and 1.")
-
     start_p = current_price(reserve_token, reserve_quote)
     k = reserve_token * reserve_quote
 
@@ -181,7 +182,7 @@ def simulate_buy_constant_product(
 class LiveDexMonitor:
     def __init__(self, timeout: int = 20) -> None:
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "telegram-live-risk-bot/2.0"})
+        self.session.headers.update({"User-Agent": "irvus-risk-bot/3.0"})
         self.timeout = timeout
 
     def _get(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -248,25 +249,19 @@ class LiveDexMonitor:
             price_change_h24=safe_float(price_change.get("h24"), 0.0) if price_change.get("h24") is not None else None,
         )
 
-    def resolve_pair(
-        self,
-        chain: str,
-        token_address: str,
-        pair_address: str,
-        query: str,
-    ) -> Dict[str, Any]:
-        if pair_address and chain:
-            pair = self.get_pair(chain, pair_address)
+    def resolve_pair(self) -> Dict[str, Any]:
+        if DEFAULT_PAIR_ADDRESS and DEFAULT_CHAIN:
+            pair = self.get_pair(DEFAULT_CHAIN, DEFAULT_PAIR_ADDRESS)
             if not pair:
                 raise ValueError("Verilen pair bulunamadı.")
             return pair
 
-        if token_address and chain:
-            pairs = self.get_token_pairs(chain, token_address)
+        if DEFAULT_TOKEN_ADDRESS and DEFAULT_CHAIN:
+            pairs = self.get_token_pairs(DEFAULT_CHAIN, DEFAULT_TOKEN_ADDRESS)
             return self.choose_best_pair(pairs)
 
-        if query:
-            pairs = self.search_pairs(query)
+        if DEFAULT_QUERY:
+            pairs = self.search_pairs(DEFAULT_QUERY)
             return self.choose_best_pair(pairs)
 
         raise ValueError("PAIR_ADDRESS veya TOKEN_ADDRESS veya QUERY gerekli.")
@@ -384,7 +379,7 @@ def build_premium_message(
 
     lines: List[str] = []
 
-    lines.append(f"🟢 {snap.base_symbol} LIVE RISK PANEL")
+    lines.append(f"🟢 {PROJECT_NAME} LIVE RISK PANEL")
     lines.append("")
     lines.append(f"⛓️ Chain: {snap.chain_id}")
     lines.append(f"🏪 DEX: {snap.dex_id}")
@@ -424,7 +419,7 @@ def build_premium_message(
 
     for amount in BUY_AMOUNTS:
         sim = simulations[amount]
-        label = f"${amount / 1000:g}K" if amount >= 1000 else f"${amount}"
+        label = f"${amount / 1000:g}K"
 
         lines.append(
             f"• {label:<5} → {fmt_token_amount(sim['token_out'])} {snap.base_symbol} | "
@@ -456,47 +451,16 @@ def build_premium_message(
     return "\n".join(lines)
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "Bot aktif ✅\n\n"
-        "Komutlar:\n"
-        "/risk - Canlı risk paneli\n"
-        "/help - Yardım"
-    )
-    await update.message.reply_text(text, disable_web_page_preview=True)
+async def send_risk_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg_obj = update.effective_message
 
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "Kullanım:\n\n"
-        "/risk\n"
-        "Varsayılan token için canlı fiyat, likidite, holders, burned/locked supply ve buy simulation gönderir.\n\n"
-        "Env ayarları:\n"
-        "BOT_TOKEN\n"
-        "CHAIN\n"
-        "TOKEN_ADDRESS\n"
-        "PAIR_ADDRESS\n"
-        "ETHERSCAN_API_KEY\n"
-        "TOTAL_SUPPLY\n"
-        "BURNED_SUPPLY\n"
-        "LOCKED_SUPPLY"
-    )
-    await update.message.reply_text(text, disable_web_page_preview=True)
-
-
-async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        await update.message.reply_text("⏳ Live risk panel hazırlanıyor...")
+        if msg_obj:
+            await msg_obj.reply_text("⏳ Live risk panel hazırlanıyor...")
 
         monitor = LiveDexMonitor()
 
-        raw_pair = monitor.resolve_pair(
-            chain=DEFAULT_CHAIN,
-            token_address=DEFAULT_TOKEN_ADDRESS,
-            pair_address=DEFAULT_PAIR_ADDRESS,
-            query=DEFAULT_QUERY,
-        )
-
+        raw_pair = monitor.resolve_pair()
         snap = monitor.normalize_pair(raw_pair)
 
         token_for_holder = DEFAULT_TOKEN_ADDRESS or snap.base_address
@@ -515,25 +479,72 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             total_supply=TOTAL_SUPPLY,
         )
 
-        await update.message.reply_text(msg, disable_web_page_preview=True)
+        if msg_obj:
+            await msg_obj.reply_text(msg, disable_web_page_preview=True)
 
     except Exception as e:
-        logger.exception("Risk komutu hata verdi")
-        await update.message.reply_text(f"⚠️ Hata: {e}")
+        logger.exception("Risk panel hata verdi")
+        if msg_obj:
+            await msg_obj.reply_text(f"⚠️ Hata: {e}")
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg_obj = update.effective_message
+    if msg_obj:
+        await msg_obj.reply_text(
+            "Bot aktif ✅\n\n"
+            "Komutlar:\n"
+            "/risk - Canlı risk paneli\n"
+            "/help - Yardım",
+            disable_web_page_preview=True,
+        )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg_obj = update.effective_message
+    if msg_obj:
+        await msg_obj.reply_text(
+            "Kullanım:\n\n"
+            "/risk\n\n"
+            "Private chat, grup veya kanal içinde çalışır.\n"
+            "Kanalda botun admin olması gerekir.",
+            disable_web_page_preview=True,
+        )
+
+
+async def channel_risk_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg_obj = update.effective_message
+
+    if not msg_obj or not msg_obj.text:
+        return
+
+    text = msg_obj.text.strip().lower()
+
+    if text.startswith("/risk"):
+        await send_risk_panel(update, context)
 
 
 def main() -> None:
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN boş. Environment variable olarak BOT_TOKEN girmelisin.")
+        raise ValueError("BOT_TOKEN boş. Railway Variables içine BOT_TOKEN girmelisin.")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Private chat ve grup komutları
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("risk", risk_command))
+    app.add_handler(CommandHandler("risk", send_risk_panel))
+
+    # Kanal postları için: kanalda /risk yazılırsa yakalar
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.CHANNEL & filters.TEXT,
+            channel_risk_message,
+        )
+    )
 
     logger.info("Bot başladı.")
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
